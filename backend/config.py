@@ -104,11 +104,25 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
 }
 
 # ------------------------------------------------------------------ API ----
-# Allow the React dev server to call the backend (CORS)
+# CORS: which frontend origins may call this API.
+#
+# Local dev origins are always allowed.
 ALLOWED_ORIGINS: list[str] = [
     "http://localhost:5173",   # Vite default
     "http://localhost:3000",   # Create React App default
-    "https://ai-codebase-assistant-cyan.vercel.app"
-    "ai-codebase-assistant-git-main-balvinder-kumar.vercel.app"
-    "ai-codebase-assistant-j1m7z85sz-balvinder-kumar.vercel.app"
 ]
+
+# Extra origins can be added via an env var on Render, as a comma-separated
+# list. Example:
+#   FRONTEND_ORIGINS=https://my-app.vercel.app,https://mydomain.com
+_extra = os.getenv("FRONTEND_ORIGINS", "")
+ALLOWED_ORIGINS += [o.strip() for o in _extra.split(",") if o.strip()]
+
+# Vercel generates a NEW preview URL on every single deploy, e.g.
+#   ai-codebase-assistant-j1m7z85sz-balvinder-kumar.vercel.app
+# Hardcoding those means redeploying the backend after every frontend push.
+# This regex matches any *.vercel.app origin instead, so previews just work.
+#
+# NOTE: CORS origins must include the scheme ("https://"), not just the
+# hostname. A bare "my-app.vercel.app" will never match.
+ALLOWED_ORIGIN_REGEX: str = r"https://.*\.vercel\.app"

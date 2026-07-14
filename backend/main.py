@@ -60,6 +60,9 @@ def root():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.ALLOWED_ORIGINS,
+    # Matches any *.vercel.app origin, so Vercel preview deploys (which get a
+    # fresh URL every push) work without redeploying this backend.
+    allow_origin_regex=config.ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
