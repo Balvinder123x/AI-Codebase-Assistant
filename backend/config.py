@@ -108,4 +108,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
 ALLOWED_ORIGINS: list[str] = [
     "http://localhost:5173",   # Vite default
     "http://localhost:3000",   # Create React App default
+    "https://ai-codebase-assistant-cyan.vercel.app"
+    "ai-codebase-assistant-git-main-balvinder-kumar.vercel.app"
+    "ai-codebase-assistant-j1m7z85sz-balvinder-kumar.vercel.app"
 ]
