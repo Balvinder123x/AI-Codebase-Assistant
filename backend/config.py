@@ -56,11 +56,23 @@ LLM_TEMPERATURE: float = 0.2
 # Tradeoff: we now need network + an API key to index, and indexing is bound
 # by API latency rather than CPU. On a small box that is the right trade.
 #
-# 768 dimensions (vs 384 for MiniLM) - richer vectors, slightly more storage.
-EMBEDDING_MODEL: str = "models/text-embedding-004"
+# MODEL NAME: gemini-embedding-001.
+# The older "text-embedding-004" was DEPRECATED on 14 Jan 2026 and now
+# returns a 404 from the API. If you see:
+#     404 models/text-embedding-004 is not found for API version v1beta
+# ...that is this exact problem.
+EMBEDDING_MODEL: str = "models/gemini-embedding-001"
 
-# How many chunks to send per embedding API call. Gemini caps batch size at
-# 100; we stay under it and keep memory flat.
+# gemini-embedding-001 returns 3072-dimensional vectors by default.
+#
+# NOTE: langchain-google-genai 2.0.7 does NOT expose an output_dimensionality
+# parameter, so we cannot truncate to 768 even though the model supports it
+# via Matryoshka Representation Learning. 3072 dims just means a larger
+# ChromaDB index - correctness is unaffected. Not worth pinning a newer,
+# less-tested library version to save disk on a demo project.
+
+# How many chunks to send per embedding API call. Keeps memory flat and
+# bounds the number of network round-trips during indexing.
 EMBEDDING_BATCH_SIZE: int = 50
 
 # ------------------------------------------------------------- Chunking ----

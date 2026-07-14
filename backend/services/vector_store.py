@@ -78,6 +78,17 @@ def get_embedding_model() -> GoogleGenerativeAIEmbeddings:
         _embedding_model = GoogleGenerativeAIEmbeddings(
             model=config.EMBEDDING_MODEL,
             google_api_key=config.GOOGLE_API_KEY,
+            # NOTE: we deliberately do NOT set `task_type`.
+            #
+            # Left unset, the library uses RETRIEVAL_DOCUMENT when embedding
+            # stored chunks and RETRIEVAL_QUERY when embedding a user's
+            # question. That asymmetry is a real quality win for RAG: a
+            # question ("how does auth work?") and the code that answers it
+            # ("def verify_token(...)") do not look alike as text, so the
+            # model embeds each side with the appropriate intent.
+            #
+            # Pinning task_type here would force ONE type for both sides and
+            # quietly degrade retrieval.
         )
 
     return _embedding_model
