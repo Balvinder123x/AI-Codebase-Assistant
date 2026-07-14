@@ -71,9 +71,23 @@ EMBEDDING_MODEL: str = "models/gemini-embedding-001"
 # ChromaDB index - correctness is unaffected. Not worth pinning a newer,
 # less-tested library version to save disk on a demo project.
 
-# How many chunks to send per embedding API call. Keeps memory flat and
-# bounds the number of network round-trips during indexing.
-EMBEDDING_BATCH_SIZE: int = 50
+# ------------------------------------------------- Embedding rate limits ---
+# Gemini free tier: ~100 embed requests PER MINUTE.
+#
+# BATCH SIZE = 100 (the API maximum).
+# Each batch is ONE request, so bigger batches mean fewer requests for the
+# same work. A 759-chunk repo becomes ~8 requests instead of 759. This is the
+# single biggest lever against 429s - do not lower it thinking "smaller is
+# safer"; smaller batches mean MORE requests, which is exactly backwards.
+EMBEDDING_BATCH_SIZE: int = 100
+
+# Seconds to wait between batches, to pace requests under the per-minute cap.
+# Raise this if you still see 429s on very large repositories.
+EMBEDDING_DELAY_SECONDS: float = 1.0
+
+# If a 429 happens anyway, retry with exponential backoff (2s, 4s, 8s, 16s,
+# 32s, 64s) rather than failing the whole index.
+EMBEDDING_MAX_RETRIES: int = 6
 
 # ------------------------------------------------------------- Chunking ----
 CHUNK_SIZE: int = 1000       # characters per chunk

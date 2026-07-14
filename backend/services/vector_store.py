@@ -41,22 +41,123 @@ all of them on every query. That is O(n) per query and it works fine at
 filtering. Chroma gives us all three in a few lines and needs no server.
 """
 
+import random
+import time
 from dataclasses import dataclass
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 import config
 from services.chunker import Chunk
 
+
+def _is_rate_limit(exc: Exception) -> bool:
+    """
+    True if this exception is a 429 / quota error from the Gemini API.
+
+    We match on the message text because the LangChain wrapper re-raises the
+    underlying Google error as a generic GoogleGenerativeAIError, so we lose
+    the typed status code.
+    """
+    text = str(exc).lower()
+    return (
+        "429" in text
+        or "quota" in text
+        or "rate limit" in text
+        or "resource_exhausted" in text
+    )
+
+
+class RetryingEmbeddings(Embeddings):
+    """
+    Wraps a LangChain Embeddings object and retries on 429 rate limits.
+
+    WHY THIS EXISTS
+    ---------------
+    Gemini's free tier allows 100 embed requests PER MINUTE. Indexing a repo
+    fires many requests back-to-back (759 chunks -> ~8 batched calls, and a
+    larger repo fires far more), so we blow through the per-minute quota in
+    seconds.
+
+    Crucially, this is a TRANSIENT limit, not a hard cap - the API itself
+    replies "please retry in 1.5s". Without retry logic, the very first 429
+    aborts the entire index and the user sees a red error banner. With it, we
+    simply wait and continue.
+
+    EXPONENTIAL BACKOFF WITH JITTER
+    -------------------------------
+    Wait times grow: 2s, 4s, 8s, 16s, 32s. Growing (rather than retrying
+    every 2s) means that if we are badly over quota we back off harder
+    instead of hammering a server that is already refusing us.
+
+    The random jitter matters too: if many requests all failed at the same
+    instant and all retried after exactly 2s, they would collide again in a
+    "thundering herd". Randomising spreads them out.
+
+    This is THE standard pattern for any rate-limited API, and it is worth
+    being able to explain in an interview.
+    """
+
+    def __init__(
+        self,
+        inner: Embeddings,
+        max_retries: int = 6,
+        base_delay: float = 2.0,
+    ) -> None:
+        self.inner = inner
+        self.max_retries = max_retries
+        self.base_delay = base_delay
+
+    def _with_retry(self, fn, *args):
+        last_exc: Exception | None = None
+
+        for attempt in range(self.max_retries):
+            try:
+                return fn(*args)
+            except Exception as exc:
+                last_exc = exc
+
+                # Only retry rate limits. A bad API key or a wrong model name
+                # will NEVER succeed on retry - failing fast on those saves
+                # the user 60 seconds of pointless waiting.
+                if not _is_rate_limit(exc):
+                    raise
+
+                if attempt == self.max_retries - 1:
+                    break
+
+                delay = self.base_delay * (2**attempt)
+                delay += random.uniform(0, 1)  # jitter
+                print(
+                    f"[embeddings] rate limited (429); "
+                    f"retry {attempt + 1}/{self.max_retries} in {delay:.1f}s"
+                )
+                time.sleep(delay)
+
+        raise RuntimeError(
+            "Gemini embedding quota exhausted after "
+            f"{self.max_retries} retries. The free tier allows ~100 embedding "
+            "requests per minute. Try a smaller repository, or wait a minute "
+            "and re-index."
+        ) from last_exc
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._with_retry(self.inner.embed_documents, texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._with_retry(self.inner.embed_query, text)
+
+
 # Global cache. Building the embeddings client is cheap (it holds no model
 # weights - it is just an API wrapper), but we still reuse one instance
 # rather than constructing a new client per request.
-_embedding_model: GoogleGenerativeAIEmbeddings | None = None
+_embedding_model: Embeddings | None = None
 
 
-def get_embedding_model() -> GoogleGenerativeAIEmbeddings:
+def get_embedding_model() -> Embeddings:
     """
     Return the shared embedding client, creating it on first use.
 
@@ -75,7 +176,7 @@ def get_embedding_model() -> GoogleGenerativeAIEmbeddings:
                 "Get one free at https://aistudio.google.com/apikey"
             )
 
-        _embedding_model = GoogleGenerativeAIEmbeddings(
+        base = GoogleGenerativeAIEmbeddings(
             model=config.EMBEDDING_MODEL,
             google_api_key=config.GOOGLE_API_KEY,
             # NOTE: we deliberately do NOT set `task_type`.
@@ -89,6 +190,12 @@ def get_embedding_model() -> GoogleGenerativeAIEmbeddings:
             #
             # Pinning task_type here would force ONE type for both sides and
             # quietly degrade retrieval.
+        )
+
+        # Wrap it so a 429 pauses and retries instead of killing the index.
+        _embedding_model = RetryingEmbeddings(
+            base,
+            max_retries=config.EMBEDDING_MAX_RETRIES,
         )
 
     return _embedding_model
@@ -159,15 +266,38 @@ def add_chunks(repo_name: str, chunks: list[Chunk]) -> int:
 
     ids = [chunk.chunk_id for chunk in chunks]
 
-    # Embed in batches. Each batch is one API call to Gemini, so this also
-    # controls how many network round-trips indexing costs. Gemini caps batch
-    # size at 100; we stay under it and keep peak memory flat.
+    # Embed in batches. Each batch is ONE API call to Gemini.
+    #
+    # RATE LIMITING (this is the important bit)
+    # -----------------------------------------
+    # Gemini's free tier allows ~100 embed requests per MINUTE. Two things
+    # keep us under that:
+    #
+    #   1. Batch size 100 (the API maximum). Bigger batches = fewer requests
+    #      for the same number of chunks. 759 chunks becomes ~8 calls, not
+    #      759. This is the single biggest lever.
+    #
+    #   2. A short sleep between batches. Without it we fire all 8 calls in
+    #      under a second, which can still trip the per-minute burst limit on
+    #      a large repo. Pacing them is cheaper than getting 429'd and then
+    #      backing off for 30s.
+    #
+    # And if we DO still get a 429, RetryingEmbeddings above waits and
+    # retries rather than killing the whole index.
     batch_size = config.EMBEDDING_BATCH_SIZE
-    for start in range(0, len(documents), batch_size):
+    total_batches = (len(documents) + batch_size - 1) // batch_size
+
+    for batch_num, start in enumerate(range(0, len(documents), batch_size), 1):
         store.add_documents(
             documents=documents[start : start + batch_size],
             ids=ids[start : start + batch_size],
         )
+        print(f"[index] embedded batch {batch_num}/{total_batches}")
+
+        # Pace the requests. Skip the wait after the final batch - there is
+        # nothing left to protect.
+        if batch_num < total_batches:
+            time.sleep(config.EMBEDDING_DELAY_SECONDS)
 
     return len(documents)
 
