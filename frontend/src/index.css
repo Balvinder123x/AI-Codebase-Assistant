@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-slate-950 text-slate-200;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+/* Thin scrollbars so the panels don't look chunky */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { @apply bg-slate-700 rounded; }
+::-webkit-scrollbar-thumb:hover { @apply bg-slate-600; }
