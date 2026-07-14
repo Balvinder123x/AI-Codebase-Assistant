@@ -56,28 +56,48 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 import config
 from services.vector_store import RetrievedChunk, search
 
-# Global cache - build the LLM client once, not per request.
-_llm: ChatGoogleGenerativeAI | None = None
+# Cache of model-name -> client, so we build each client only once.
+_llm_cache: dict[str, ChatGoogleGenerativeAI] = {}
 
 
-def get_llm() -> ChatGoogleGenerativeAI:
-    """Return the shared LLM client, creating it on first use."""
-    global _llm
-
-    if _llm is None:
+def _build_llm(model_name: str) -> ChatGoogleGenerativeAI:
+    """Build (and cache) a client for one specific model."""
+    if model_name not in _llm_cache:
         if not config.GOOGLE_API_KEY:
             raise ValueError(
                 "GOOGLE_API_KEY is not set. Copy .env.example to .env and "
                 "paste your key from https://aistudio.google.com/apikey"
             )
 
-        _llm = ChatGoogleGenerativeAI(
-            model=config.LLM_MODEL,
+        _llm_cache[model_name] = ChatGoogleGenerativeAI(
+            model=model_name,
             temperature=config.LLM_TEMPERATURE,
             google_api_key=config.GOOGLE_API_KEY,
         )
 
-    return _llm
+    return _llm_cache[model_name]
+
+
+def get_llm() -> ChatGoogleGenerativeAI:
+    """Return a client for the primary model."""
+    return _build_llm(config.LLM_MODEL)
+
+
+def _is_model_unavailable(exc: Exception) -> bool:
+    """
+    True if this error means "try a different model", as opposed to a bug we
+    should surface.
+
+    Covers:
+      - 404: the model was retired (e.g. gemini-2.0-flash after 3 Mar 2026)
+      - 429: rate limited, OR quota_value: 0 which ALSO means retired
+      - 503: model temporarily overloaded
+    """
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in ("429", "404", "503", "quota", "not found", "overloaded")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +168,7 @@ class RagAnswer:
 
     answer: str
     sources: list[RetrievedChunk]
+    model_used: str  # which model actually produced this (may be a fallback)
 
 
 def ask(repo_name: str, question: str, top_k: int | None = None) -> RagAnswer:
@@ -162,12 +183,49 @@ def ask(repo_name: str, question: str, top_k: int | None = None) -> RagAnswer:
     # 2. AUGMENT - build the prompt with the retrieved code as context
     context = format_context(chunks)
 
-    # 3. GENERATE - one LLM call
-    # The '|' operator is LCEL (LangChain Expression Language). It pipes the
-    # output of each step into the next:
-    #     dict -> formatted prompt -> LLM -> plain string
-    chain = prompt_template | get_llm() | StrOutputParser()
+    # 3. GENERATE - try the primary model, then each fallback in turn.
+    #
+    # WHY A FALLBACK CHAIN?
+    # Google retires models. gemini-2.0-flash was killed on 3 Mar 2026 and
+    # started returning "429 ... limit: 0" - a confusing error that looks like
+    # a quota problem but actually means the model is gone. With a single
+    # hardcoded model, that one deprecation takes the entire app down.
+    #
+    # Walking a list means the app degrades to the next model instead of
+    # dying. This is the same reasoning behind retrying embeddings on 429:
+    # depend on a remote service, plan for it being unavailable.
+    models_to_try = [config.LLM_MODEL, *config.LLM_FALLBACK_MODELS]
+    last_error: Exception | None = None
 
-    answer = chain.invoke({"context": context, "question": question})
+    for model_name in models_to_try:
+        try:
+            # LCEL: the '|' operator pipes each step into the next.
+            #     dict -> formatted prompt -> LLM -> plain string
+            chain = prompt_template | _build_llm(model_name) | StrOutputParser()
+            answer = chain.invoke({"context": context, "question": question})
 
-    return RagAnswer(answer=answer, sources=chunks)
+            if model_name != config.LLM_MODEL:
+                print(f"[llm] primary unavailable; answered with {model_name}")
+
+            return RagAnswer(
+                answer=answer, sources=chunks, model_used=model_name
+            )
+
+        except Exception as exc:
+            last_error = exc
+
+            # A missing API key will fail on EVERY model - surface it now
+            # rather than making the user wait through the whole chain.
+            if isinstance(exc, ValueError):
+                raise
+
+            if not _is_model_unavailable(exc):
+                raise  # a real bug, not a dead/limited model
+
+            print(f"[llm] {model_name} unavailable, trying next fallback...")
+
+    raise RuntimeError(
+        "All Gemini models are currently unavailable or rate limited "
+        f"(tried: {', '.join(models_to_try)}). Free-tier daily quotas reset "
+        "at midnight Pacific time. Please try again later."
+    ) from last_error

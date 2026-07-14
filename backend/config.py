@@ -38,7 +38,29 @@ CHROMA_DIR.mkdir(exist_ok=True)
 # ------------------------------------------------------------------ LLM ----
 GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
 
-LLM_MODEL: str = "gemini-2.0-flash"
+# MODEL CHOICE
+# ------------
+# gemini-2.0-flash was RETIRED on 3 March 2026. Calling it now returns a 429
+# with the very confusing "limit: 0" - that is not a quota you burned through,
+# it means the model serves NO free traffic at all. If you ever see
+#     quota_value: 0 ... quota_id: "...PerDay...FreeTier"
+# suspect a dead model, not overuse.
+#
+# We use 2.5 Flash-Lite: it has the most generous free-tier limits of the
+# Gemini family (~15-30 RPM, ~1,000+ requests/day). This app makes exactly
+# ONE LLM call per question, so requests-per-day is the limit that matters,
+# and Flash-Lite maximises it.
+LLM_MODEL: str = "gemini-2.5-flash-lite"
+
+# FALLBACK CHAIN
+# --------------
+# If the primary model is retired, rate-limited, or unavailable, try these in
+# order. This is why the app will not die the next time Google sunsets a
+# model - it just degrades to the next one.
+LLM_FALLBACK_MODELS: list[str] = [
+    "gemini-2.5-flash",       # more capable, lower daily quota
+    "gemini-flash-latest",    # alias - always points at a live Flash model
+]
 
 # Low temperature = factual, deterministic. We want the same answer every
 # time for "what does this function do", not creative variation.

@@ -70,6 +70,10 @@ class AskResponse(BaseModel):
 
     answer: str
     sources: list[SourceChunk]
+    model_used: str = Field(
+        default="",
+        description="Which Gemini model answered (may be a fallback).",
+    )
 
 
 class FileInfoResponse(BaseModel):

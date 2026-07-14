@@ -142,6 +142,10 @@ def ask_question(request: AskRequest) -> AskResponse:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        # Every model in the fallback chain was unavailable/rate limited.
+        # 429 (not 500) - this is a quota problem, not a server bug.
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500, detail=f"Failed to generate answer: {exc}"
@@ -149,6 +153,7 @@ def ask_question(request: AskRequest) -> AskResponse:
 
     return AskResponse(
         answer=result.answer,
+        model_used=result.model_used,
         sources=[
             SourceChunk(
                 file_path=chunk.file_path,
