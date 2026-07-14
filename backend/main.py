@@ -45,6 +45,15 @@ app = FastAPI(
     version="1.0.0",
 )
 
+@app.get("/")
+def root():
+    return {
+        "project": "AI Codebase Assistant",
+        "status": "running",
+        "docs": "/docs",
+        "health": "/health"
+    }
+
 # CORS: the browser blocks cross-origin requests by default. The React dev
 # server runs on :5173 and the API on :8000 - different ports means different
 # origins, so we must explicitly allow it.
