@@ -14,6 +14,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Chroma phones home by default and, on some versions, spams the logs with
+# "Failed to send telemetry event" on every single call. That noise buries
+# real errors in the Render dashboard. Must be set BEFORE chromadb imports.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+
 # Load variables from the .env file into os.environ
 load_dotenv()
 
@@ -40,9 +45,23 @@ LLM_MODEL: str = "gemini-2.0-flash"
 LLM_TEMPERATURE: float = 0.2
 
 # ----------------------------------------------------------- Embeddings ----
-# Runs locally via sentence-transformers. Free, offline, 384 dimensions.
-# Downloads ~90MB on first use, then cached forever.
-EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+# Gemini embeddings, called over the API.
+#
+# WHY NOT A LOCAL sentence-transformers MODEL?
+# sentence-transformers depends on PyTorch, which occupies ~250-400MB of RAM
+# just to import - before embedding a single chunk. On a 512MB host (Render
+# free tier) that alone OOMs the process.
+#
+# Calling Gemini's embedding API instead means zero model weights in memory.
+# Tradeoff: we now need network + an API key to index, and indexing is bound
+# by API latency rather than CPU. On a small box that is the right trade.
+#
+# 768 dimensions (vs 384 for MiniLM) - richer vectors, slightly more storage.
+EMBEDDING_MODEL: str = "models/text-embedding-004"
+
+# How many chunks to send per embedding API call. Gemini caps batch size at
+# 100; we stay under it and keep memory flat.
+EMBEDDING_BATCH_SIZE: int = 50
 
 # ------------------------------------------------------------- Chunking ----
 CHUNK_SIZE: int = 1000       # characters per chunk

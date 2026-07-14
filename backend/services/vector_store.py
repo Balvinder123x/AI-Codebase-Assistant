@@ -8,9 +8,9 @@ Wraps ChromaDB. Two jobs:
 
 WHAT IS AN EMBEDDING?
 ---------------------
-A function that turns text into a fixed-length list of numbers (here: 384
+A function that turns text into a fixed-length list of numbers (here: 768
 floats) such that texts with similar MEANING end up close together in that
-384-dimensional space.
+768-dimensional space.
 
 "function that reads a file"  ->  [0.02, -0.41, 0.88, ...]
 "def load_file(path):"        ->  [0.03, -0.39, 0.85, ...]   <- close!
@@ -19,6 +19,18 @@ floats) such that texts with similar MEANING end up close together in that
 This is why semantic search beats keyword search (Ctrl+F): the user can ask
 "how does authentication work?" and we find `verify_token()` even though
 the word "authentication" appears nowhere in it.
+
+WHERE DO THE EMBEDDINGS COME FROM?
+----------------------------------
+Gemini's embedding API (models/text-embedding-004), NOT a local model.
+
+Originally this used sentence-transformers running on CPU. That pulls in
+PyTorch, which costs ~250-400MB of RAM just to import - before embedding a
+single chunk. On a 512MB host that OOMs the process on startup.
+
+Calling the API instead keeps zero model weights in memory. The tradeoff:
+indexing now needs network access and an API key, and is bound by API
+latency rather than CPU. On a small box, that is the right trade.
 
 WHY A VECTOR DATABASE INSTEAD OF A PYTHON LIST?
 -----------------------------------------------
@@ -33,28 +45,39 @@ from dataclasses import dataclass
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 import config
 from services.chunker import Chunk
 
-# Global cache. Loading the sentence-transformers model takes ~3 seconds and
-# ~90MB of RAM, so we do it ONCE and reuse it for the whole process lifetime.
-# Without this, every single API request would reload the model.
-_embedding_model: HuggingFaceEmbeddings | None = None
+# Global cache. Building the embeddings client is cheap (it holds no model
+# weights - it is just an API wrapper), but we still reuse one instance
+# rather than constructing a new client per request.
+_embedding_model: GoogleGenerativeAIEmbeddings | None = None
 
 
-def get_embedding_model() -> HuggingFaceEmbeddings:
-    """Return the shared embedding model, loading it on first use."""
+def get_embedding_model() -> GoogleGenerativeAIEmbeddings:
+    """
+    Return the shared embedding client, creating it on first use.
+
+    NOTE: this holds NO model weights in memory. It sends text to Gemini's
+    embedding endpoint and receives vectors back. That is the entire reason
+    we can run on a 512MB host - a local sentence-transformers model would
+    drag in PyTorch and OOM the process before embedding anything.
+    """
     global _embedding_model
 
     if _embedding_model is None:
-        _embedding_model = HuggingFaceEmbeddings(
-            model_name=config.EMBEDDING_MODEL,
-            model_kwargs={"device": "cpu"},
-            # Normalising to unit length means cosine similarity reduces to a
-            # simple dot product - faster, and it is what Chroma expects.
-            encode_kwargs={"normalize_embeddings": True},
+        if not config.GOOGLE_API_KEY:
+            raise ValueError(
+                "GOOGLE_API_KEY is not set. Embeddings now run through the "
+                "Gemini API, so a key is required to index a repository. "
+                "Get one free at https://aistudio.google.com/apikey"
+            )
+
+        _embedding_model = GoogleGenerativeAIEmbeddings(
+            model=config.EMBEDDING_MODEL,
+            google_api_key=config.GOOGLE_API_KEY,
         )
 
     return _embedding_model
@@ -125,9 +148,10 @@ def add_chunks(repo_name: str, chunks: list[Chunk]) -> int:
 
     ids = [chunk.chunk_id for chunk in chunks]
 
-    # Add in batches. Chroma has an internal limit on batch size, and
-    # embedding 5000 chunks in one call can spike memory.
-    batch_size = 100
+    # Embed in batches. Each batch is one API call to Gemini, so this also
+    # controls how many network round-trips indexing costs. Gemini caps batch
+    # size at 100; we stay under it and keep peak memory flat.
+    batch_size = config.EMBEDDING_BATCH_SIZE
     for start in range(0, len(documents), batch_size):
         store.add_documents(
             documents=documents[start : start + batch_size],

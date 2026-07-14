@@ -7,15 +7,15 @@ python-dotenv==1.0.1
 # --- LangChain ---
 langchain==0.3.13
 langchain-core==0.3.28
-langchain-community==0.3.13
 langchain-text-splitters==0.3.4
 
-# --- LLM provider (Google Gemini - free tier) ---
+# --- LLM + Embeddings (both via Google Gemini) ---
+#
+# NOTE: sentence-transformers and langchain-huggingface were REMOVED here.
+# They depend on PyTorch (~250-400MB RSS on import), which OOMs a 512MB host
+# before a single chunk is embedded. Embeddings now run through the Gemini
+# API, so no model weights are held in memory.
 langchain-google-genai==2.0.7
-
-# --- Embeddings (local, free, no API cost) ---
-langchain-huggingface==0.1.2
-sentence-transformers==3.3.1
 
 # --- Vector database ---
 langchain-chroma==0.1.4
